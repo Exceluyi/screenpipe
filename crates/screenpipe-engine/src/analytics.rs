@@ -58,9 +58,15 @@ pub fn get_distinct_id() -> &'static str {
     ANALYTICS.distinct_id()
 }
 
-/// Capture an analytics event
+/// Capture an analytics event.
+///
+/// Screenpipe-owned PostHog remains governed by the existing telemetry opt-in.
+/// User-configured sinks (PostHog mirror / OTLP) are handled by
+/// `screenpipe_core::telemetry` so SDK and embedded runtimes share the same exporter.
 pub async fn capture_event(event: &str, properties: Value) {
-    if !TELEMETRY_ENABLED.load(Ordering::SeqCst) {
+    let screenpipe_telemetry_enabled = TELEMETRY_ENABLED.load(Ordering::SeqCst);
+    let has_user_sinks = screenpipe_core::telemetry::has_user_sinks();
+    if !screenpipe_telemetry_enabled && !has_user_sinks {
         return;
     }
 
@@ -71,29 +77,43 @@ pub async fn capture_event(event: &str, properties: Value) {
         obj.insert("release".to_string(), json!(env!("CARGO_PKG_VERSION")));
     }
 
-    let payload = json!({
-        "api_key": POSTHOG_API_KEY,
-        "event": event,
-        "properties": props,
-    });
+    if screenpipe_telemetry_enabled {
+        let payload = json!({
+            "api_key": POSTHOG_API_KEY,
+            "event": event,
+            "properties": props.clone(),
+        });
 
-    trace!(target: "analytics", "Capturing event: {} {:?}", event, payload);
+        trace!(target: "analytics", "Capturing event: {} {:?}", event, payload);
 
-    let client = &ANALYTICS.client;
-    if let Err(e) = client
-        .post(format!("{}/capture/", POSTHOG_HOST))
-        .json(&payload)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        debug!("failed to send analytics event: {}", e);
+        let client = &ANALYTICS.client;
+        if let Err(e) = client
+            .post(format!("{}/capture/", POSTHOG_HOST))
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            debug!("failed to send analytics event: {}", e);
+        }
+    }
+
+    if has_user_sinks {
+        screenpipe_core::telemetry::capture_event(
+            "screenpipe-engine",
+            env!("CARGO_PKG_VERSION"),
+            event,
+            props,
+        )
+        .await;
     }
 }
 
 /// Capture event without blocking (fire and forget)
 pub fn capture_event_nonblocking(event: &'static str, properties: Value) {
-    if !TELEMETRY_ENABLED.load(Ordering::SeqCst) {
+    let screenpipe_telemetry_enabled = TELEMETRY_ENABLED.load(Ordering::SeqCst);
+    let has_user_sinks = screenpipe_core::telemetry::has_user_sinks();
+    if !screenpipe_telemetry_enabled && !has_user_sinks {
         return;
     }
 
@@ -116,7 +136,7 @@ fn parse_macos_major_version(version_str: &str) -> Option<u32> {
 /// - Below 14 (Sonoma): sck-rs may have issues, recommended to upgrade
 #[cfg(target_os = "macos")]
 pub fn check_macos_version() {
-    if !TELEMETRY_ENABLED.load(Ordering::SeqCst) {
+    if !TELEMETRY_ENABLED.load(Ordering::SeqCst) && !screenpipe_core::telemetry::has_user_sinks() {
         return;
     }
 
