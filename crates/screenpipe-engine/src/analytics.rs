@@ -89,41 +89,15 @@ pub fn get_distinct_id() -> &'static str {
     ANALYTICS.distinct_id()
 }
 
-/// Capture an operational analytics event.
+/// Capture an analytics event.
 ///
-/// Existing Screenpipe PostHog telemetry is sent only when the user opted in. User-configured
-/// PostHog and OTLP sinks mirror the same operational event when their env vars are present.
+/// Screenpipe-owned PostHog remains governed by the existing telemetry opt-in.
+/// User-configured sinks (PostHog mirror / OTLP) are handled by
+/// `screenpipe_core::telemetry` so SDK and embedded runtimes share the same exporter.
 pub async fn capture_event(event: &str, properties: Value) {
     let screenpipe_telemetry_enabled = TELEMETRY_ENABLED.load(Ordering::SeqCst);
-    let has_user_sink = ANALYTICS.user_posthog.is_some() || ANALYTICS.otlp.is_some();
-    if !screenpipe_telemetry_enabled && !has_user_sink {
-        return;
-    }
-
-    let props = enrich_properties(properties);
-
-    trace!(target: "analytics", "Capturing event: {} {:?}", event, props);
-
-    let client = &ANALYTICS.client;
-
-    if screenpipe_telemetry_enabled {
-        send_posthog_event(client, POSTHOG_HOST, POSTHOG_API_KEY, event, props.clone()).await;
-    }
-
-    if let Some(config) = ANALYTICS.user_posthog.clone() {
-        send_posthog_event(client, &config.host, &config.api_key, event, props.clone()).await;
-    }
-
-    if let Some(config) = ANALYTICS.otlp.clone() {
-        send_otlp_event(client, &config, event, props).await;
-    }
-}
-
-/// Capture event without blocking (fire and forget)
-pub fn capture_event_nonblocking(event: &'static str, properties: Value) {
-    let screenpipe_telemetry_enabled = TELEMETRY_ENABLED.load(Ordering::SeqCst);
-    let has_user_sink = ANALYTICS.user_posthog.is_some() || ANALYTICS.otlp.is_some();
-    if !screenpipe_telemetry_enabled && !has_user_sink {
+    let has_user_sinks = screenpipe_core::telemetry::has_user_sinks();
+    if !screenpipe_telemetry_enabled && !has_user_sinks {
         return;
     }
 
@@ -141,37 +115,44 @@ fn enrich_properties(mut properties: Value) -> Value {
     properties
 }
 
-async fn send_posthog_event(client: &Client, host: &str, api_key: &str, event: &str, props: Value) {
-    let payload = json!({
-        "api_key": api_key,
-        "event": event,
-        "properties": props,
-    });
+    if screenpipe_telemetry_enabled {
+        let payload = json!({
+            "api_key": POSTHOG_API_KEY,
+            "event": event,
+            "properties": props.clone(),
+        });
 
-    if let Err(e) = client
-        .post(format!("{}/capture/", host.trim_end_matches('/')))
-        .json(&payload)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        debug!("failed to send PostHog analytics event to {}: {}", host, e);
+        trace!(target: "analytics", "Capturing event: {} {:?}", event, payload);
+
+        let client = &ANALYTICS.client;
+        if let Err(e) = client
+            .post(format!("{}/capture/", POSTHOG_HOST))
+            .json(&payload)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            debug!("failed to send analytics event: {}", e);
+        }
+    }
+
+    if has_user_sinks {
+        screenpipe_core::telemetry::capture_event(
+            "screenpipe-engine",
+            env!("CARGO_PKG_VERSION"),
+            event,
+            props,
+        )
+        .await;
     }
 }
 
-async fn send_otlp_event(client: &Client, config: &OtlpConfig, event: &str, props: Value) {
-    let mut attributes = vec![
-        otlp_attribute("event.name", Value::String(event.to_string())),
-        otlp_attribute("screenpipe.signal", Value::String("event".to_string())),
-    ];
-
-    if let Some(obj) = props.as_object() {
-        for (key, value) in obj {
-            attributes.push(otlp_attribute(
-                &format!("screenpipe.{}", sanitize_attr_key(key)),
-                value.clone(),
-            ));
-        }
+/// Capture event without blocking (fire and forget)
+pub fn capture_event_nonblocking(event: &'static str, properties: Value) {
+    let screenpipe_telemetry_enabled = TELEMETRY_ENABLED.load(Ordering::SeqCst);
+    let has_user_sinks = screenpipe_core::telemetry::has_user_sinks();
+    if !screenpipe_telemetry_enabled && !has_user_sinks {
+        return;
     }
 
     let payload = json!({
@@ -370,7 +351,7 @@ fn parse_macos_major_version(version_str: &str) -> Option<u32> {
 /// - Below 14 (Sonoma): sck-rs may have issues, recommended to upgrade
 #[cfg(target_os = "macos")]
 pub fn check_macos_version() {
-    if !TELEMETRY_ENABLED.load(Ordering::SeqCst) {
+    if !TELEMETRY_ENABLED.load(Ordering::SeqCst) && !screenpipe_core::telemetry::has_user_sinks() {
         return;
     }
 

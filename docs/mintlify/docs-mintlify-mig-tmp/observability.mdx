@@ -3,7 +3,7 @@ title: "observability"
 description: "Send screenpipe operational telemetry to your own PostHog or OpenTelemetry collector."
 ---
 
-screenpipe can mirror operational telemetry from the CLI/SDK runtime to backends that you control. This is opt-in and configured with environment variables; when none of these variables are set, behavior is unchanged.
+screenpipe can mirror operational telemetry from the CLI, SDK, and embedded recorder runtimes to backends that you control. This is opt-in and configured with environment variables; when none of these variables are set, behavior is unchanged.
 
 ## privacy boundary
 
@@ -11,6 +11,7 @@ Only operational signals are emitted. screenpipe does **not** include recorded c
 
 Current event families include:
 
+- SDK recorder start/stop/error events for apps that embed `@screenpipe/sdk` or the Rust recorder crate
 - API usage counters
 - vision pipeline health, including frame counts, OCR counts, queue depth, latency, and drop counters
 - audio pipeline health, including chunk counts, transcription latency, queue depth, device count, and error counters
